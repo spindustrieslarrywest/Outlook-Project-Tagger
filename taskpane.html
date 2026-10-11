@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=Edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Tagger</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #5f6670;
+    --line: #d9dde3;
+    --field: #ffffff;
+    --accent: #1d4f91;
+    --accent-fg: #ffffff;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --err: #b42318;
+    --hover: #f2f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f1f1f;
+      --fg: #e8e8e8;
+      --muted: #a5abb3;
+      --line: #3a3f45;
+      --field: #2a2a2a;
+      --accent: #6aa3e8;
+      --accent-fg: #0d1b2a;
+      --ok: #57c27a;
+      --warn: #e0b440;
+      --err: #f07a6f;
+      --hover: #2c3137;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 14px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { padding: 14px 14px 24px; }
+  section { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+  .eyebrow { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+  .subject { font-weight: 600; margin-bottom: 12px; overflow-wrap: anywhere; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  select, input[type=text] {
+    width: 100%; padding: 7px 8px; font: inherit; color: var(--fg);
+    background: var(--field); border: 1px solid var(--line); border-radius: 4px;
+  }
+  select:focus, input[type=text]:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  select:disabled, input:disabled, button:disabled { opacity: .55; cursor: default; }
+  .row { display: flex; gap: 6px; }
+  .row input { flex: 1; min-width: 0; }
+  button {
+    font: inherit; padding: 7px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg); font-weight: 600;
+  }
+  button.quiet { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; padding: 3px 8px; font-size: 12px; }
+  button.quiet.confirm { border-color: var(--err); color: var(--err); }
+  .check { display: flex; align-items: center; gap: 6px; font-weight: 400; margin: 8px 0 0; }
+  .msg { min-height: 1.4em; margin-top: 8px; font-size: 13px; }
+  .msg.ok { color: var(--ok); }
+  .msg.warn { color: var(--warn); }
+  .msg.err { color: var(--err); }
+  details summary { cursor: pointer; font-weight: 600; padding: 2px 0; }
+  ul { list-style: none; margin: 8px 0 0; padding: 0; }
+  li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+  li:hover { background: var(--hover); }
+  li span { overflow-wrap: anywhere; }
+  .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+  .empty { color: var(--muted); font-style: italic; padding: 6px 4px; }
+  #blocked { display: none; padding: 14px; }
+</style>
+</head>
+<body>
+<div id="blocked" role="alert"></div>
+<main id="app" hidden>
+  <section>
+    <div class="eyebrow">This email</div>
+    <div id="subject" class="subject">—</div>
+    <label for="projectSelect">Project</label>
+    <select id="projectSelect"></select>
+    <div id="status" class="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section>
+    <label for="newName">New project</label>
+    <div class="row">
+      <input type="text" id="newName" maxlength="80" placeholder="Project name" autocomplete="off">
+      <button id="addBtn" type="button">Add</button>
+    </div>
+    <label class="check"><input type="checkbox" id="tagToo" checked> Tag this email with it</label>
+    <div id="newMsg" class="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <details id="manage">
+    <summary>Manage projects (<span id="count">0</span>)</summary>
+    <ul id="list"></ul>
+    <p class="hint">Removing a project only takes it off this list. Emails already tagged keep their category in Outlook.</p>
+  </details>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORE_KEY = "projects";
+  var NONE = "";
+  var projects = [];
+  var busy = false;
+  var refreshToken = 0;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var el = {};
+
+  function same(a, b) { return String(a).trim().toLowerCase() === String(b).trim().toLowerCase(); }
+  function findProject(name) { for (var i = 0; i < projects.length; i++) { if (same(projects[i], name)) return projects[i]; } return null; }
+  function sortProjects() { projects.sort(function (a, b) { return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }); }); }
+
+  function setMsg(node, text, kind) { node.textContent = text || ""; node.className = "msg" + (kind ? " " + kind : ""); }
+
+  function errText(e) {
+    if (!e) return "Unknown error.";
+    return (e.message || e.name || String(e)) + (e.code ? " (code " + e.code + ")" : "");
+  }
+
+  // ---- Office wrappers -------------------------------------------------
+  function asPromise(target, method, args) {
+    return new Promise(function (resolve, reject) {
+      var a = (args || []).slice();
+      a.push(function (r) {
+        if (r.status === Office.AsyncResultStatus.Succeeded) resolve(r.value);
+        else reject(r.error);
+      });
+      target[method].apply(target, a);
+    });
+  }
+  function currentItem() { return Office.context.mailbox.item || null; }
+  function getItemCategories(item) { return asPromise(item.categories, "getAsync").then(function (v) { return v || []; }); }
+  function addItemCategories(item, names) { return asPromise(item.categories, "addAsync", [names]); }
+  function removeItemCategories(item, names) { return asPromise(item.categories, "removeAsync", [names]); }
+  function getMaster() { return asPromise(Office.context.mailbox.masterCategories, "getAsync").then(function (v) { return v || []; }); }
+  function addMaster(list) { return asPromise(Office.context.mailbox.masterCategories, "addAsync", [list]); }
+
+  function loadProjects() {
+    var v = Office.context.roamingSettings.get(STORE_KEY);
+    projects = Array.isArray(v) ? v.filter(function (s) { return typeof s === "string" && s.trim(); }) : [];
+    sortProjects();
+  }
+  function saveProjects() {
+    Office.context.roamingSettings.set(STORE_KEY, projects.slice());
+    return asPromise(Office.context.roamingSettings, "saveAsync");
+  }
+
+  // Pick a stable colour per project name from Outlook's 25 presets.
+  function colorFor(name) {
+    var h = 0, s = name.toLowerCase();
+    for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+    var key = "Preset" + (h % 25);
+    var enums = Office.MailboxEnums && Office.MailboxEnums.CategoryColor;
+    return (enums && enums[key]) || key;
+  }
+
+  // Make sure a category exists in the mailbox's master list.
+  // Returns the exact display name Outlook holds (an existing category keeps its own capitalisation).
+  function ensureMaster(name) {
+    return getMaster().then(function (master) {
+      for (var i = 0; i < master.length; i++) {
+        if (same(master[i].displayName, name)) return { name: master[i].displayName, existed: true };
+      }
+      return addMaster([{ displayName: name, color: colorFor(name) }])
+        .then(function () { return { name: name, existed: false }; })
+        .catch(function (e) {
+          if (e && /duplicate/i.test(e.name || e.message || "")) return { name: name, existed: true };
+          throw e;
+        });
+    });
+  }
+
+  // ---- Rendering -------------------------------------------------------
+  function renderSelect(selected) {
+    var sel = el.select;
+    sel.innerHTML = "";
+    var none = document.createElement("option");
+    none.value = NONE;
+    none.textContent = "— No project —";
+    sel.appendChild(none);
+    projects.forEach(function (p) {
+      var o = document.createElement("option");
+      o.value = p;
+      o.textContent = p;
+      sel.appendChild(o);
+    });
+    sel.value = selected && findProject(selected) ? findProject(selected) : NONE;
+  }
+
+  function renderList() {
+    el.count.textContent = projects.length;
+    el.list.innerHTML = "";
+    if (!projects.length) {
+      var li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No projects yet.";
+      el.list.appendChild(li);
+      return;
+    }
+    projects.forEach(function (p) {
+      var li = document.createElement("li");
+      var span = document.createElement("span");
+      span.textContent = p;
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quiet";
+      btn.textContent = "Remove";
+      var timer = null;
+      btn.addEventListener("click", function () {
+        if (!btn.classList.contains("confirm")) {
+          btn.classList.add("confirm");
+          btn.textContent = "Confirm";
+          timer = setTimeout(function () { btn.classList.remove("confirm"); btn.textContent = "Remove"; }, 4000);
+          return;
+        }
+        clearTimeout(timer);
+        removeProject(p);
+      });
+      li.appendChild(span);
+      li.appendChild(btn);
+      el.list.appendChild(li);
+    });
+  }
+
+  function setBusy(on) {
+    busy = on;
+    var noItem = !currentItem();
+    el.select.disabled = on || noItem;
+    el.addBtn.disabled = on;
+    el.newName.disabled = on;
+  }
+
+  // ---- Reading the open email -----------------------------------------
+  function refreshCurrent() {
+    var token = ++refreshToken;
+    var item = currentItem();
+    setMsg(el.status, "");
+    if (!item) {
+      el.subject.textContent = "No email selected";
+      renderSelect(NONE);
+      el.tagToo.disabled = true;
+      setBusy(false);
+      return Promise.resolve();
+    }
+    el.tagToo.disabled = false;
+    el.subject.textContent = (typeof item.subject === "string" && item.subject) ? item.subject : "(no subject)";
+    el.select.disabled = true;
+    return getItemCategories(item).then(function (cats) {
+      if (token !== refreshToken) return;
+      var tagged = [];
+      cats.forEach(function (c) { var p = findProject(c.displayName); if (p && tagged.indexOf(p) < 0) tagged.push(p); });
+      renderSelect(tagged[0] || NONE);
+      if (tagged.length > 1) {
+        setMsg(el.status, "Tagged with more than one project: " + tagged.join(", ") + ". Picking one replaces the others.", "warn");
+      }
+      setBusy(false);
+    }).catch(function (e) {
+      if (token !== refreshToken) return;
+      renderSelect(NONE);
+      setMsg(el.status, "Could not read this email's categories. " + errText(e), "err");
+      setBusy(false);
+    });
+  }
+
+  // ---- Tagging ---------------------------------------------------------
+  // One project per email: removes any other project category, keeps non-project categories.
+  function applyProject(name) {
+    var item = currentItem();
+    if (!item) return Promise.resolve();
+    setBusy(true);
+    setMsg(el.status, "Saving…");
+    var target = null;
+    return getItemCategories(item).then(function (cats) {
+      var names = cats.map(function (c) { return c.displayName; });
+      var toRemove = names.filter(function (n) { return findProject(n) && !(name && same(n, name)); });
+      var already = name ? names.some(function (n) { return same(n, name); }) : false;
+      var step = toRemove.length ? removeItemCategories(item, toRemove) : Promise.resolve();
+      return step.then(function () {
+        if (!name || already) return;
+        return ensureMaster(name).then(function (m) { target = m.name; return addItemCategories(item, [m.name]); });
+      });
+    }).then(function () {
+      setBusy(false);
+      setMsg(el.status, name ? "Tagged: " + name : "Project removed from this email.", "ok");
+    }).catch(function (e) {
+      setBusy(false);
+      setMsg(el.status, "Could not update this email. " + errText(e), "err");
+      return refreshCurrent().then(function () { setMsg(el.status, "Could not update this email. " + errText(e), "err"); });
+    });
+  }
+
+  // ---- Projects --------------------------------------------------------
+  function addProject() {
+    var raw = el.newName.value;
+    var name = raw.trim().replace(/\s+/g, " ");
+    setMsg(el.newMsg, "");
+    if (!name) { setMsg(el.newMsg, "Type a project name first.", "err"); return; }
+    if (/[,;]/.test(name)) { setMsg(el.newMsg, "Leave out commas and semicolons; Outlook uses them to separate categories.", "err"); return; }
+    var existing = findProject(name);
+    var wantTag = el.tagToo.checked && !!currentItem();
+    if (existing) {
+      setMsg(el.newMsg, "“" + existing + "” is already on the list.", "warn");
+      if (wantTag) { el.select.value = existing; applyProject(existing); }
+      return;
+    }
+    setBusy(true);
+    setMsg(el.newMsg, "Adding…");
+    var finalName = name;
+    var reused = false;
+    ensureMaster(name).then(function (m) {
+      finalName = m.name;
+      reused = m.existed;
+      projects.push(finalName);
+      sortProjects();
+      return saveProjects().catch(function (e) {
+        projects = projects.filter(function (p) { return p !== finalName; });
+        throw e;
+      });
+    }).then(function () {
+      el.newName.value = "";
+      renderList();
+      renderSelect(el.select.value);
+      setBusy(false);
+      setMsg(el.newMsg, "Added “" + finalName + "”" + (reused ? " (matched your existing Outlook category)." : "."), "ok");
+      if (wantTag) { el.select.value = finalName; return applyProject(finalName); }
+    }).catch(function (e) {
+      renderList();
+      setBusy(false);
+      setMsg(el.newMsg, "Could not add the project. " + errText(e), "err");
+    });
+  }
+
+  function removeProject(name) {
+    var before = projects.slice();
+    projects = projects.filter(function (p) { return p !== name; });
+    setBusy(true);
+    saveProjects().then(function () {
+      renderList();
+      setBusy(false);
+      setMsg(el.newMsg, "Removed “" + name + "” from the list.", "ok");
+      return refreshCurrent();
+    }).catch(function (e) {
+      projects = before;
+      renderList();
+      setBusy(false);
+      setMsg(el.newMsg, "Could not remove the project. " + errText(e), "err");
+    });
+  }
+
+  // ---- Start -----------------------------------------------------------
+  function block(text) {
+    var b = $("blocked");
+    b.textContent = text;
+    b.style.display = "block";
+  }
+
+  function start() {
+    el = {
+      subject: $("subject"), select: $("projectSelect"), status: $("status"),
+      newName: $("newName"), addBtn: $("addBtn"), tagToo: $("tagToo"), newMsg: $("newMsg"),
+      list: $("list"), count: $("count")
+    };
+    if (!Office.context.requirements.isSetSupported("Mailbox", "1.8")) {
+      block("This version of Outlook can't set categories from an add-in (it needs Mailbox requirement set 1.8). Try Outlook on the web or the new Outlook.");
+      return;
+    }
+    $("app").hidden = false;
+    loadProjects();
+    renderList();
+    el.select.addEventListener("change", function () { if (!busy) applyProject(el.select.value); });
+    el.addBtn.addEventListener("click", function () { if (!busy) addProject(); });
+    el.newName.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && !busy) { ev.preventDefault(); addProject(); } });
+    if (Office.context.mailbox.addHandlerAsync && Office.EventType.ItemChanged) {
+      Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, function () { refreshCurrent(); });
+    }
+    refreshCurrent();
+  }
+
+  if (typeof Office === "undefined") {
+    block("Outlook's add-in library didn't load. Check the network connection and reopen the panel.");
+    return;
+  }
+  Office.onReady(function (info) {
+    if (info && info.host === Office.HostType.Outlook) start();
+    else block("Open this panel from Outlook. It only works inside an email.");
+  });
+})();
+</script>
+</body>
+</html>
